@@ -1,40 +1,36 @@
-name: Windows long path probe
+name: Checks
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
 
 permissions:
   contents: read
 
 jobs:
-  probe:
-    runs-on: windows-11-arm
-    timeout-minutes: 15
+  actionlint:
+    name: Validate workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
-      - name: Reproduce and fix the Qt checkout.
-        shell: bash
+      - name: Check out repository.
+        uses: actions/checkout@v7
+
+      - name: Run actionlint.
+        env:
+          ACTIONLINT_VERSION: 1.7.12
         run: |
           set -euo pipefail
-          mkdir -p build/tmp/Libraries/winarm64
-          cd build/tmp/Libraries/winarm64
-
-          git config --global core.longpaths false
-          if git clone --depth 1 --branch v6.11.2 --no-recurse-submodules \
-              https://github.com/qt/qt5.git qt-disabled \
-              > "$RUNNER_TEMP/longpaths-disabled.log" 2>&1; then
-            echo "Qt checkout unexpectedly succeeded with core.longpaths=false"
-            exit 1
-          fi
-          grep -m 3 -F "Filename too long" "$RUNNER_TEMP/longpaths-disabled.log"
-
-          git config --global core.longpaths true
-          test "$(git config --global --bool core.longpaths)" = "true"
-          git clone --depth 1 --branch v6.11.2 --no-recurse-submodules \
-            https://github.com/qt/qt5.git qt_6.11.2
-
-          deep_file="qt_6.11.2/coin/provisioning/common/windows/conan_manifests/libjpeg-turbo/2.0.5/qtproject/stable/package/1655126cc73fa38b3abf5795b2008935595969ae/conanmanifest.txt"
-          test -f "$deep_file"
-          echo "core.longpaths=$(git config --global --bool core.longpaths)"
-          echo "checked_out=$(git -C qt_6.11.2 rev-parse HEAD)"
-          echo "deep_file_length=${#deep_file}"
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          base="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/$archive" "$base/$archive"
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/actionlint_checksums.txt" \
+            "$base/actionlint_${ACTIONLINT_VERSION}_checksums.txt"
+          grep "  ${archive}$" "$RUNNER_TEMP/actionlint_checksums.txt" \
+            | (cd "$RUNNER_TEMP" && sha256sum --check -)
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -shellcheck= -pyflakes=
