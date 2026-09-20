@@ -136,12 +136,15 @@ jobs:
           set -euo pipefail
           python -c "from pathlib import Path; assert b'ccache:disable' in Path('Telegram/SourceFiles/_other/packer.cpp').read_bytes()[:4096]"
 
-      # subst 会被 Python 和 Qt 还原成长路径，复制到物理短目录后再编译。
+      # subst 会被 Python 和 Qt 还原成长路径，移动到物理短目录并保留回链可避免双份源码占盘。
       - name: Create short build workspace.
         shell: cmd
+        working-directory: C:\
         run: |
-          robocopy "%GITHUB_WORKSPACE%" "%SHORT_WORKSPACE%" /MIR /XD "%GITHUB_WORKSPACE%\.git" /R:2 /W:1
+          robocopy "%GITHUB_WORKSPACE%" "%SHORT_WORKSPACE%" /MOVE /E /R:2 /W:1
           if %ERRORLEVEL% GEQ 8 exit /b %ERRORLEVEL%
+          rmdir "%GITHUB_WORKSPACE%"
+          mklink /J "%GITHUB_WORKSPACE%" "%SHORT_WORKSPACE%"
           exit /b 0
 
       - name: Set up MSVC.
