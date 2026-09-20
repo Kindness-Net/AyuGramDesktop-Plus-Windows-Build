@@ -102,6 +102,11 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
+      # Git 长路径只覆盖检出；编译阶段用短盘符约束 MSVC、CMake 与 qmake 的路径长度。
+      - name: Map short workspace path.
+        shell: cmd
+        run: 'subst B: "%GITHUB_WORKSPACE%"'
+
       - name: Set up Python.
         uses: actions/setup-python@v7
         with:
@@ -171,7 +176,7 @@ jobs:
 
       - name: Build dependencies.
         shell: cmd
-        run: python scripts/prebuild.py
+        run: cd /d B:\ && python scripts/prebuild.py
 
       # 中间产物不入库可把缓存压到 10 GB 限制内，恢复后阶段标记仍完整
       # Qt 6 的 cmake 配置引用安装目录里的 objects-*，裁掉会让 arm64 配置阶段直接失败
@@ -201,7 +206,7 @@ jobs:
 
       - name: Build AyuGram Desktop.
         shell: cmd
-        run: python scripts/build.py --jobs %BUILD_JOBS% --pack --clean-pack
+        run: cd /d B:\ && python scripts/build.py --jobs %BUILD_JOBS% --pack --clean-pack
 
       - name: Check release output.
         shell: bash
