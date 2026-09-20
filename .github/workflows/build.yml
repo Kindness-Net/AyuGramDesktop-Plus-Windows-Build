@@ -34,7 +34,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.source_ref }}
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ inputs.source_ref }}
   cancel-in-progress: true
 
 jobs:
