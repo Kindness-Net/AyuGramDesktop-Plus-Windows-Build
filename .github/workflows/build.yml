@@ -87,6 +87,13 @@ jobs:
           set -euo pipefail
           test "$GITHUB_ACTOR" = "KiritoXDone"
 
+      - name: Enable Git long paths.
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global core.longpaths true
+          test "$(git config --global --bool core.longpaths)" = "true"
+
       - name: Check out repository.
         uses: actions/checkout@v7
         with:
