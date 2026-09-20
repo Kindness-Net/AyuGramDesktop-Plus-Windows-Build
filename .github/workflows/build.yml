@@ -31,6 +31,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.source_ref }}
@@ -102,6 +103,7 @@ jobs:
       - name: Validate source request.
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           SOURCE_REF: ${{ inputs.source_ref }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
