@@ -79,6 +79,7 @@ jobs:
       AYUGRAM_TOOLSET_VERSION: ${{ matrix.toolset }}
       AYUGRAM_CMAKE_TOOLSET: ${{ matrix.cmake_toolset }}
       AYUGRAM_CMAKE_GENERATOR: ${{ matrix.generator }}
+      SHORT_WORKSPACE: 'C:\w'
 
     steps:
       - name: Validate dispatcher.
@@ -101,11 +102,6 @@ jobs:
           ref: ${{ inputs.source_sha }}
           submodules: recursive
           persist-credentials: false
-
-      # Git 长路径只覆盖检出；编译阶段用短盘符约束 MSVC、CMake 与 qmake 的路径长度。
-      - name: Map short workspace path.
-        shell: cmd
-        run: 'subst B: "%GITHUB_WORKSPACE%"'
 
       - name: Set up Python.
         uses: actions/setup-python@v7
@@ -140,6 +136,14 @@ jobs:
           set -euo pipefail
           python -c "from pathlib import Path; assert b'ccache:disable' in Path('Telegram/SourceFiles/_other/packer.cpp').read_bytes()[:4096]"
 
+      # subst 会被 Python 和 Qt 还原成长路径，复制到物理短目录后再编译。
+      - name: Create short build workspace.
+        shell: cmd
+        run: |
+          robocopy "%GITHUB_WORKSPACE%" "%SHORT_WORKSPACE%" /MIR /XD "%GITHUB_WORKSPACE%\.git" /R:2 /W:1
+          if %ERRORLEVEL% GEQ 8 exit /b %ERRORLEVEL%
+          exit /b 0
+
       - name: Set up MSVC.
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -160,8 +164,8 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: |
-            build/tmp/Libraries
-            build/tmp/ThirdParty
+            ${{ env.SHORT_WORKSPACE }}\build\tmp\Libraries
+            ${{ env.SHORT_WORKSPACE }}\build\tmp\ThirdParty
           key: win-libs-${{ matrix.arch }}-${{ hashFiles('scripts/prebuild.py', 'scripts/trim_windows_cache.py', 'scripts/build_support/recipes.py', 'scripts/build_support/recipes_arm64.py', 'scripts/build_support/dependency_cache.py') }}
           restore-keys: win-libs-${{ matrix.arch }}-
 
@@ -169,6 +173,7 @@ jobs:
       - name: Clean broken msys2 links.
         if: steps.cache-libs.outputs.cache-matched-key != ''
         shell: bash
+        working-directory: ${{ env.SHORT_WORKSPACE }}
         run: |
           set -euo pipefail
           rm -f build/tmp/ThirdParty/msys64/etc/mtab
@@ -176,12 +181,14 @@ jobs:
 
       - name: Build dependencies.
         shell: cmd
-        run: cd /d B:\ && python scripts/prebuild.py
+        working-directory: ${{ env.SHORT_WORKSPACE }}
+        run: python scripts/prebuild.py
 
       # 中间产物不入库可把缓存压到 10 GB 限制内，恢复后阶段标记仍完整
       # Qt 6 的 cmake 配置引用安装目录里的 objects-*，裁掉会让 arm64 配置阶段直接失败
       - name: Trim intermediate build files.
         shell: cmd
+        working-directory: ${{ env.SHORT_WORKSPACE }}
         run: python scripts/trim_windows_cache.py build/tmp/Libraries build/tmp/ThirdParty
 
       # 依赖建好立即入库，后续构建失败不再连带丢失 prebuild 缓存
@@ -190,13 +197,14 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: |
-            build/tmp/Libraries
-            build/tmp/ThirdParty
+            ${{ env.SHORT_WORKSPACE }}\build\tmp\Libraries
+            ${{ env.SHORT_WORKSPACE }}\build\tmp\ThirdParty
           key: ${{ steps.cache-libs.outputs.cache-primary-key }}
 
       # Packer 是 Telegram 的构建依赖，私钥头文件必须在编译前就位
       - name: Write packer signing key.
         shell: bash
+        working-directory: ${{ env.SHORT_WORKSPACE }}
         env:
           PACKER_PRIVATE_H: ${{ secrets.PACKER_PRIVATE_H }}
         run: |
@@ -206,10 +214,12 @@ jobs:
 
       - name: Build AyuGram Desktop.
         shell: cmd
-        run: cd /d B:\ && python scripts/build.py --jobs %BUILD_JOBS% --pack --clean-pack
+        working-directory: ${{ env.SHORT_WORKSPACE }}
+        run: python scripts/build.py --jobs %BUILD_JOBS% --pack --clean-pack
 
       - name: Check release output.
         shell: bash
+        working-directory: ${{ env.SHORT_WORKSPACE }}
         run: |
           set -euo pipefail
           artifact=$(ls build/AyuGram-v*-win-${{ matrix.arch }}.zip | head -1)
@@ -219,6 +229,7 @@ jobs:
 
       - name: Pack update.
         shell: bash
+        working-directory: ${{ env.SHORT_WORKSPACE }}
         run: |
           set -euo pipefail
           version=$(sed -n 's/^AppUpdateVersion  *//p' Telegram/build/version)
@@ -233,6 +244,7 @@ jobs:
 
       - name: Write artifact provenance.
         shell: bash
+        working-directory: ${{ env.SHORT_WORKSPACE }}
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
           SOURCE_REF: ${{ inputs.source_ref }}
@@ -266,12 +278,12 @@ jobs:
         with:
           name: AyuGram-Windows-${{ matrix.arch }}
           path: |
-            build/AyuGram-v*-win-${{ matrix.arch }}.zip
-            build/${{ matrix.updater }}*
-            build/provenance-windows-${{ matrix.arch }}.json
+            ${{ env.SHORT_WORKSPACE }}\build\AyuGram-v*-win-${{ matrix.arch }}.zip
+            ${{ env.SHORT_WORKSPACE }}\build\${{ matrix.updater }}*
+            ${{ env.SHORT_WORKSPACE }}\build\provenance-windows-${{ matrix.arch }}.json
           retention-days: 7
 
       - name: Remove packer signing key.
         if: always()
         shell: bash
-        run: rm -f Telegram/SourceFiles/_other/packer_private.h
+        run: rm -f /c/w/Telegram/SourceFiles/_other/packer_private.h
