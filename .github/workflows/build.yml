@@ -85,12 +85,6 @@ jobs:
       LIBRARIES_PATH: '${{ matrix.workspace }}\build\tmp\Libraries\${{ matrix.target }}'
 
     steps:
-      - name: Validate dispatcher.
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$GITHUB_ACTOR" = "KiritoXDone"
-
       - name: Enable Git long paths.
         shell: bash
         run: |
@@ -189,9 +183,21 @@ jobs:
           df -h /c || true
           df -h /d || true
 
-      # 工具链、Qt 与其他库分开归档，单个分片变化不再让整个依赖缓存失效。
+      # 将三个依赖分片合并归档，减少 Actions 压缩与索引开销；旧分片仍用于一次性迁移。
+      - name: Restore combined dependency cache.
+        id: cache-combined
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ env.SHORT_WORKSPACE }}\build\tmp\Libraries
+            ${{ env.SHORT_WORKSPACE }}\build\tmp\ThirdParty
+          key: win-libs-v2-${{ matrix.arch }}-${{ hashFiles('scripts/prebuild.py', 'scripts/trim_windows_cache.py', 'scripts/build_support/recipes.py', 'scripts/build_support/recipes_arm64.py', 'scripts/build_support/dependency_cache.py', 'scripts/build_support/dependency_env.py') }}
+          restore-keys: win-libs-v2-${{ matrix.arch }}-
+
+      # 旧缓存只在新合并缓存完全没有命中时恢复，下一次成功编译会迁移为单包缓存。
       - name: Restore ThirdParty cache.
         id: cache-third-party
+        if: steps.cache-combined.outputs.cache-matched-key == ''
         uses: actions/cache/restore@v6
         with:
           path: ${{ env.SHORT_WORKSPACE }}\build\tmp\ThirdParty
@@ -200,6 +206,7 @@ jobs:
 
       - name: Restore libraries cache.
         id: cache-libraries
+        if: steps.cache-combined.outputs.cache-matched-key == ''
         uses: actions/cache/restore@v6
         with:
           path: |
@@ -214,6 +221,7 @@ jobs:
       # Qt 同时包含 qt_* 源码目录、Qt-* 安装目录和对应的阶段完成标记。
       - name: Restore Qt cache.
         id: cache-qt
+        if: steps.cache-combined.outputs.cache-matched-key == ''
         uses: actions/cache/restore@v6
         with:
           path: |
@@ -226,7 +234,8 @@ jobs:
       - name: Restore legacy libraries cache.
         id: cache-legacy
         if: >-
-          steps.cache-third-party.outputs.cache-matched-key == ''
+          steps.cache-combined.outputs.cache-matched-key == ''
+            && steps.cache-third-party.outputs.cache-matched-key == ''
             && steps.cache-libraries.outputs.cache-matched-key == ''
             && steps.cache-qt.outputs.cache-matched-key == ''
         uses: actions/cache/restore@v6
@@ -240,7 +249,8 @@ jobs:
       # 缓存归档保不住符号链接，msys2 的 mtab 与 dev 由运行时重建
       - name: Clean broken msys2 links.
         if: >-
-          steps.cache-third-party.outputs.cache-matched-key != ''
+          steps.cache-combined.outputs.cache-matched-key != ''
+            || steps.cache-third-party.outputs.cache-matched-key != ''
             || steps.cache-legacy.outputs.cache-matched-key != ''
         shell: bash
         working-directory: ${{ env.SHORT_WORKSPACE }}
@@ -263,43 +273,18 @@ jobs:
         working-directory: ${{ env.SHORT_WORKSPACE }}
         run: python scripts/trim_windows_cache.py build/tmp/Libraries build/tmp/ThirdParty
 
-      # 只有 prebuild 和裁剪都成功才入库；后续应用编译失败不影响这些已验证分片。
-      - name: Save ThirdParty cache.
+      # 只有依赖编译和裁剪都成功才写入；应用编译失败不会污染这份依赖缓存。
+      - name: Save combined dependency cache.
         if: >-
           steps.build-dependencies.outcome == 'success'
             && steps.trim-dependencies.outcome == 'success'
-            && steps.cache-third-party.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: ${{ env.SHORT_WORKSPACE }}\build\tmp\ThirdParty
-          key: ${{ steps.cache-third-party.outputs.cache-primary-key }}
-
-      - name: Save libraries cache.
-        if: >-
-          steps.build-dependencies.outcome == 'success'
-            && steps.trim-dependencies.outcome == 'success'
-            && steps.cache-libraries.outputs.cache-hit != 'true'
+            && steps.cache-combined.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: |
-            ${{ env.LIBRARIES_PATH }}\*
-            !${{ env.LIBRARIES_PATH }}\cache_keys
-            !${{ env.LIBRARIES_PATH }}\[qQ]t[_-]*
-            ${{ env.LIBRARIES_PATH }}\cache_keys\*
-            !${{ env.LIBRARIES_PATH }}\cache_keys\[qQ]t[_-]*
-          key: ${{ steps.cache-libraries.outputs.cache-primary-key }}
-
-      - name: Save Qt cache.
-        if: >-
-          steps.build-dependencies.outcome == 'success'
-            && steps.trim-dependencies.outcome == 'success'
-            && steps.cache-qt.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: |
-            ${{ env.LIBRARIES_PATH }}\[qQ]t[_-]*
-            ${{ env.LIBRARIES_PATH }}\cache_keys\[qQ]t[_-]*
-          key: ${{ steps.cache-qt.outputs.cache-primary-key }}
+            ${{ env.SHORT_WORKSPACE }}\build\tmp\Libraries
+            ${{ env.SHORT_WORKSPACE }}\build\tmp\ThirdParty
+          key: ${{ steps.cache-combined.outputs.cache-primary-key }}
 
       # Packer 是 Telegram 的构建依赖，私钥头文件必须在编译前就位
       - name: Write packer signing key.
