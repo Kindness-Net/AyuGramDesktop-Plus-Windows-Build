@@ -160,10 +160,29 @@ jobs:
           rm -rf "/c/Program Files (x86)/Microsoft SQL Server" || true
           rm -rf "/c/Program Files/MongoDB" || true
           rm -rf "/c/Program Files/MySQL" || true
+          rm -rf "/c/Program Files/PostgreSQL" || true
           rm -rf "/c/Program Files/R" || true
+          rm -rf "/c/Program Files/Amazon" || true
+          rm -rf "/c/Program Files/LLVM" || true
+          rm -rf "/c/Program Files (x86)/LLVM" || true
+          rm -rf "/c/Program Files/nodejs" || true
+          rm -rf "/c/Program Files/Microsoft Service Fabric" || true
+          rm -rf "/c/Program Files/Microsoft SDKs/Service Fabric" || true
+          rm -rf /c/Miniconda || true
+          rm -rf /c/PostgreSQL || true
+          rm -rf /c/cabal || true
+          rm -rf /c/ghcup || true
+          rm -rf /c/mingw64 || true
+          rm -rf /c/msys64 || true
+          rm -rf /c/Strawberry || true
+          rm -rf /c/vcpkg || true
           rm -rf /c/hostedtoolcache/windows/go || true
+          rm -rf /c/hostedtoolcache/windows/node || true
+          rm -rf /c/hostedtoolcache/windows/PyPy || true
           rm -rf /c/hostedtoolcache/windows/Ruby || true
           rm -rf /c/hostedtoolcache/windows/Java_Temurin-Hotspot_jdk || true
+          find /c/hostedtoolcache/windows/Python -mindepth 1 -maxdepth 1 \
+            -type d ! -name 3.12.10 -exec rm -rf {} + || true
           df -h /c
 
       # 恢复后由预编译脚本检查 Qt 安装是否完整，旧缓存也必须经过检查。
