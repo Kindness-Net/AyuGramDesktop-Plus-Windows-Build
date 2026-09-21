@@ -80,6 +80,7 @@ jobs:
       AYUGRAM_CMAKE_TOOLSET: ${{ matrix.cmake_toolset }}
       AYUGRAM_CMAKE_GENERATOR: ${{ matrix.generator }}
       SHORT_WORKSPACE: 'C:\w'
+      LIBRARIES_PATH: 'C:\w\build\tmp\Libraries\${{ matrix.target }}'
 
     steps:
       - name: Validate dispatcher.
@@ -185,9 +186,46 @@ jobs:
             -type d ! -name 3.12.10 -exec rm -rf {} + || true
           df -h /c
 
-      # 恢复后由预编译脚本检查 Qt 安装是否完整，旧缓存也必须经过检查。
+      # 工具链、Qt 与其他库分开归档，单个分片变化不再让整个依赖缓存失效。
+      - name: Restore ThirdParty cache.
+        id: cache-third-party
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.SHORT_WORKSPACE }}\build\tmp\ThirdParty
+          key: win-third-party-v1-${{ matrix.arch }}-${{ hashFiles('scripts/prebuild.py', 'scripts/trim_windows_cache.py', 'scripts/build_support/recipes.py', 'scripts/build_support/recipes_arm64.py', 'scripts/build_support/dependency_cache.py', 'scripts/build_support/dependency_env.py') }}
+          restore-keys: win-third-party-v1-${{ matrix.arch }}-
+
       - name: Restore libraries cache.
-        id: cache-libs
+        id: cache-libraries
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ env.LIBRARIES_PATH }}\*
+            !${{ env.LIBRARIES_PATH }}\cache_keys
+            !${{ env.LIBRARIES_PATH }}\[qQ]t[_-]*
+            ${{ env.LIBRARIES_PATH }}\cache_keys\*
+            !${{ env.LIBRARIES_PATH }}\cache_keys\[qQ]t[_-]*
+          key: win-libraries-v1-${{ matrix.arch }}-${{ hashFiles('scripts/prebuild.py', 'scripts/trim_windows_cache.py', 'scripts/build_support/recipes.py', 'scripts/build_support/recipes_arm64.py', 'scripts/build_support/dependency_cache.py', 'scripts/build_support/dependency_env.py') }}
+          restore-keys: win-libraries-v1-${{ matrix.arch }}-
+
+      # Qt 同时包含 qt_* 源码目录、Qt-* 安装目录和对应的阶段完成标记。
+      - name: Restore Qt cache.
+        id: cache-qt
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ env.LIBRARIES_PATH }}\[qQ]t[_-]*
+            ${{ env.LIBRARIES_PATH }}\cache_keys\[qQ]t[_-]*
+          key: win-qt-v1-${{ matrix.arch }}-${{ hashFiles('scripts/prebuild.py', 'scripts/trim_windows_cache.py', 'scripts/build_support/recipes.py', 'scripts/build_support/recipes_arm64.py', 'scripts/build_support/dependency_cache.py', 'scripts/build_support/dependency_env.py') }}
+          restore-keys: win-qt-v1-${{ matrix.arch }}-
+
+      # 首次切换时复用旧的整包缓存；三个新分片都未命中时才恢复，避免相互覆盖。
+      - name: Restore legacy libraries cache.
+        id: cache-legacy
+        if: >-
+          steps.cache-third-party.outputs.cache-matched-key == ''
+            && steps.cache-libraries.outputs.cache-matched-key == ''
+            && steps.cache-qt.outputs.cache-matched-key == ''
         uses: actions/cache/restore@v6
         with:
           path: |
@@ -198,7 +236,9 @@ jobs:
 
       # 缓存归档保不住符号链接，msys2 的 mtab 与 dev 由运行时重建
       - name: Clean broken msys2 links.
-        if: steps.cache-libs.outputs.cache-matched-key != ''
+        if: >-
+          steps.cache-third-party.outputs.cache-matched-key != ''
+            || steps.cache-legacy.outputs.cache-matched-key != ''
         shell: bash
         working-directory: ${{ env.SHORT_WORKSPACE }}
         run: |
@@ -207,6 +247,7 @@ jobs:
           rm -rf build/tmp/ThirdParty/msys64/dev || true
 
       - name: Build dependencies.
+        id: build-dependencies
         shell: cmd
         working-directory: ${{ env.SHORT_WORKSPACE }}
         run: python scripts/prebuild.py
@@ -214,19 +255,48 @@ jobs:
       # 中间产物不入库可把缓存压到 10 GB 限制内，恢复后阶段标记仍完整
       # Qt 6 的 cmake 配置引用安装目录里的 objects-*，裁掉会让 arm64 配置阶段直接失败
       - name: Trim intermediate build files.
+        id: trim-dependencies
         shell: cmd
         working-directory: ${{ env.SHORT_WORKSPACE }}
         run: python scripts/trim_windows_cache.py build/tmp/Libraries build/tmp/ThirdParty
 
-      # 依赖建好立即入库，后续构建失败不再连带丢失 prebuild 缓存
+      # 只有 prebuild 和裁剪都成功才入库；后续应用编译失败不影响这些已验证分片。
+      - name: Save ThirdParty cache.
+        if: >-
+          steps.build-dependencies.outcome == 'success'
+            && steps.trim-dependencies.outcome == 'success'
+            && steps.cache-third-party.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.SHORT_WORKSPACE }}\build\tmp\ThirdParty
+          key: ${{ steps.cache-third-party.outputs.cache-primary-key }}
+
       - name: Save libraries cache.
-        if: steps.cache-libs.outputs.cache-hit != 'true'
+        if: >-
+          steps.build-dependencies.outcome == 'success'
+            && steps.trim-dependencies.outcome == 'success'
+            && steps.cache-libraries.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: |
-            ${{ env.SHORT_WORKSPACE }}\build\tmp\Libraries
-            ${{ env.SHORT_WORKSPACE }}\build\tmp\ThirdParty
-          key: ${{ steps.cache-libs.outputs.cache-primary-key }}
+            ${{ env.LIBRARIES_PATH }}\*
+            !${{ env.LIBRARIES_PATH }}\cache_keys
+            !${{ env.LIBRARIES_PATH }}\[qQ]t[_-]*
+            ${{ env.LIBRARIES_PATH }}\cache_keys\*
+            !${{ env.LIBRARIES_PATH }}\cache_keys\[qQ]t[_-]*
+          key: ${{ steps.cache-libraries.outputs.cache-primary-key }}
+
+      - name: Save Qt cache.
+        if: >-
+          steps.build-dependencies.outcome == 'success'
+            && steps.trim-dependencies.outcome == 'success'
+            && steps.cache-qt.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ env.LIBRARIES_PATH }}\[qQ]t[_-]*
+            ${{ env.LIBRARIES_PATH }}\cache_keys\[qQ]t[_-]*
+          key: ${{ steps.cache-qt.outputs.cache-primary-key }}
 
       # Packer 是 Telegram 的构建依赖，私钥头文件必须在编译前就位
       - name: Write packer signing key.
