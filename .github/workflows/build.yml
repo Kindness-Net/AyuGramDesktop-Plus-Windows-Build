@@ -79,7 +79,7 @@ jobs:
       AYUGRAM_TOOLSET_VERSION: ${{ matrix.toolset }}
       AYUGRAM_CMAKE_TOOLSET: ${{ matrix.cmake_toolset }}
       AYUGRAM_CMAKE_GENERATOR: ${{ matrix.generator }}
-      SHORT_WORKSPACE: 'C:\w'
+      SHORT_WORKSPACE: 'D:\w'
 
     steps:
       - name: Validate dispatcher.
@@ -183,7 +183,8 @@ jobs:
           rm -rf /c/hostedtoolcache/windows/Java_Temurin-Hotspot_jdk || true
           find /c/hostedtoolcache/windows/Python -mindepth 1 -maxdepth 1 \
             -type d ! -name 3.12.10 -exec rm -rf {} + || true
-          df -h /c
+          df -h /c || true
+          df -h /d || true
 
       # 恢复后由预编译脚本检查 Qt 安装是否完整，旧缓存也必须经过检查。
       - name: Restore libraries cache.
@@ -313,4 +314,4 @@ jobs:
       - name: Remove packer signing key.
         if: always()
         shell: bash
-        run: rm -f /c/w/Telegram/SourceFiles/_other/packer_private.h
+        run: rm -f /d/w/Telegram/SourceFiles/_other/packer_private.h
