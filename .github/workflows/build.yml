@@ -51,6 +51,7 @@ jobs:
         include:
           - arch: x64
             runner: windows-latest
+            workspace: 'D:\w'
             target: win64
             special: win64
             updater: tx64upd
@@ -61,6 +62,7 @@ jobs:
           # arm64 runner 上只有 VS 2022，工具链按行指定
           - arch: arm64
             runner: windows-11-arm
+            workspace: 'C:\w'
             target: winarm64
             special: winarm
             updater: tarm64upd
@@ -79,8 +81,8 @@ jobs:
       AYUGRAM_TOOLSET_VERSION: ${{ matrix.toolset }}
       AYUGRAM_CMAKE_TOOLSET: ${{ matrix.cmake_toolset }}
       AYUGRAM_CMAKE_GENERATOR: ${{ matrix.generator }}
-      SHORT_WORKSPACE: 'C:\w'
-      LIBRARIES_PATH: 'C:\w\build\tmp\Libraries\${{ matrix.target }}'
+      SHORT_WORKSPACE: ${{ matrix.workspace }}
+      LIBRARIES_PATH: '${{ matrix.workspace }}\build\tmp\Libraries\${{ matrix.target }}'
 
     steps:
       - name: Validate dispatcher.
@@ -184,7 +186,8 @@ jobs:
           rm -rf /c/hostedtoolcache/windows/Java_Temurin-Hotspot_jdk || true
           find /c/hostedtoolcache/windows/Python -mindepth 1 -maxdepth 1 \
             -type d ! -name 3.12.10 -exec rm -rf {} + || true
-          df -h /c
+          df -h /c || true
+          df -h /d || true
 
       # 工具链、Qt 与其他库分开归档，单个分片变化不再让整个依赖缓存失效。
       - name: Restore ThirdParty cache.
@@ -383,4 +386,5 @@ jobs:
       - name: Remove packer signing key.
         if: always()
         shell: bash
-        run: rm -f /c/w/Telegram/SourceFiles/_other/packer_private.h
+        working-directory: ${{ env.SHORT_WORKSPACE }}
+        run: rm -f Telegram/SourceFiles/_other/packer_private.h
