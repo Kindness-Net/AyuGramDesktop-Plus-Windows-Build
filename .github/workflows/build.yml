@@ -1,5 +1,5 @@
 name: Windows
-run-name: "Windows · source run #${{ inputs.source_run_id }}.${{ inputs.source_run_attempt }} · ${{ inputs.source_sha }}"
+run-name: "Windows x64 · source run #${{ inputs.source_run_id }}.${{ inputs.source_run_attempt }} · ${{ inputs.source_sha }}"
 
 on:
   workflow_dispatch:
@@ -31,7 +31,8 @@ on:
 
 permissions:
   contents: read
-  actions: read
+  # 构建成功后清理同前缀的旧世代缓存
+  actions: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}-${{ inputs.source_ref }}
@@ -39,37 +40,9 @@ concurrency:
 
 jobs:
   windows:
-    name: Windows ${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
+    name: Windows x64
+    runs-on: windows-latest
     timeout-minutes: 359
-    # arm64 配方已就位但未在 CI 跑通，通过前不阻塞发布
-    continue-on-error: ${{ matrix.arch != 'x64' }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            runner: windows-latest
-            workspace: 'D:\w'
-            target: win64
-            special: win64
-            updater: tx64upd
-            vcvars: x64
-            toolset: '14.51'
-            cmake_toolset: v145
-            generator: 'Visual Studio 18 2026'
-          # arm64 runner 上只有 VS 2022，工具链按行指定
-          - arch: arm64
-            runner: windows-11-arm
-            workspace: 'C:\w'
-            target: winarm64
-            special: winarm
-            updater: tarm64upd
-            vcvars: arm64
-            toolset: '14.44'
-            cmake_toolset: v143
-            generator: 'Visual Studio 17 2022'
 
     env:
       # /m 与 /MP 相乘耗尽内存会僵死 runner，锁定单项目串行
@@ -77,14 +50,21 @@ jobs:
       # tg_owt 模板单元单个 2 GB 以上，并发顶格 2
       BUILD_JOBS: '2'
       # 传给 scripts/build_support，按行指定目标平台与工具链
-      AYUGRAM_TARGET: ${{ matrix.target }}
-      AYUGRAM_TOOLSET_VERSION: ${{ matrix.toolset }}
-      AYUGRAM_CMAKE_TOOLSET: ${{ matrix.cmake_toolset }}
-      AYUGRAM_CMAKE_GENERATOR: ${{ matrix.generator }}
-      SHORT_WORKSPACE: ${{ matrix.workspace }}
-      LIBRARIES_PATH: '${{ matrix.workspace }}\build\tmp\Libraries\${{ matrix.target }}'
+      AYUGRAM_TARGET: win64
+      AYUGRAM_TOOLSET_VERSION: '14.51'
+      AYUGRAM_CMAKE_TOOLSET: v145
+      AYUGRAM_CMAKE_GENERATOR: 'Visual Studio 18 2026'
+      AYUGRAM_VCVARS_ARCH: x64
+      SHORT_WORKSPACE: 'D:\w'
+      CACHE_KEY_PREFIX: win-libs-x64-
 
     steps:
+      - name: Validate dispatcher.
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTOR" = "KiritoXDone"
+
       - name: Enable Git long paths.
         shell: bash
         run: |
@@ -98,6 +78,7 @@ jobs:
           repository: Kindness-Kismet/AyuGramDesktop-Plus
           ref: ${{ inputs.source_sha }}
           submodules: recursive
+          fetch-depth: 1
           persist-credentials: false
 
       - name: Set up Python.
@@ -144,12 +125,42 @@ jobs:
       - name: Set up MSVC.
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: ${{ matrix.vcvars }}
+          arch: ${{ env.AYUGRAM_VCVARS_ARCH }}
 
-      - name: Free up disk space.
+      # 每个架构独占一个仓库，整体缓存各自享有完整的 10 GB 配额。
+      - name: Restore libraries cache.
+        id: cache-libs
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ env.SHORT_WORKSPACE }}\build\tmp\Libraries
+            ${{ env.SHORT_WORKSPACE }}\build\tmp\ThirdParty
+          key: ${{ env.CACHE_KEY_PREFIX }}${{ hashFiles('scripts/prebuild.py', 'scripts/trim_windows_cache.py', 'scripts/build_support/recipes.py', 'scripts/build_support/recipes_arm64.py', 'scripts/build_support/dependency_cache.py') }}
+          restore-keys: ${{ env.CACHE_KEY_PREFIX }}
+
+      # 缓存归档保不住符号链接，msys2 的 mtab 与 dev 由运行时重建
+      - name: Clean broken msys2 links.
+        if: steps.cache-libs.outputs.cache-matched-key != ''
         shell: bash
+        working-directory: ${{ env.SHORT_WORKSPACE }}
         run: |
           set -euo pipefail
+          rm -f build/tmp/ThirdParty/msys64/etc/mtab
+          rm -rf build/tmp/ThirdParty/msys64/dev || true
+
+      # 缓存命中且磁盘宽裕时跳过清理；全量依赖编译前必须清出空间
+      - name: Free up disk space.
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.cache-libs.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          free_gb=$(df -BG --output=avail /d | tail -1 | tr -dc '0-9')
+          echo "free space on D: ${free_gb} GiB (cache hit: ${CACHE_HIT})"
+          if test "$CACHE_HIT" = "true" && test "$free_gb" -ge 60; then
+            echo "cache hit with enough free space, skipping cleanup"
+            exit 0
+          fi
           rm -rf "/c/Program Files/dotnet" || true
           rm -rf "/c/Program Files (x86)/Android" || true
           rm -rf "/c/Program Files/Microsoft SDKs/Azure" || true
@@ -183,82 +194,6 @@ jobs:
           df -h /c || true
           df -h /d || true
 
-      # 将三个依赖分片合并归档，减少 Actions 压缩与索引开销；旧分片仍用于一次性迁移。
-      - name: Restore combined dependency cache.
-        id: cache-combined
-        uses: actions/cache/restore@v6
-        with:
-          path: |
-            ${{ env.SHORT_WORKSPACE }}\build\tmp\Libraries
-            ${{ env.SHORT_WORKSPACE }}\build\tmp\ThirdParty
-          key: win-libs-v2-${{ matrix.arch }}-${{ hashFiles('scripts/prebuild.py', 'scripts/trim_windows_cache.py', 'scripts/build_support/recipes.py', 'scripts/build_support/recipes_arm64.py', 'scripts/build_support/dependency_cache.py', 'scripts/build_support/dependency_env.py') }}
-          restore-keys: win-libs-v2-${{ matrix.arch }}-
-
-      # 旧缓存只在新合并缓存完全没有命中时恢复，下一次成功编译会迁移为单包缓存。
-      - name: Restore ThirdParty cache.
-        id: cache-third-party
-        if: steps.cache-combined.outputs.cache-matched-key == ''
-        uses: actions/cache/restore@v6
-        with:
-          path: ${{ env.SHORT_WORKSPACE }}\build\tmp\ThirdParty
-          key: win-third-party-v1-${{ matrix.arch }}-${{ hashFiles('scripts/prebuild.py', 'scripts/trim_windows_cache.py', 'scripts/build_support/recipes.py', 'scripts/build_support/recipes_arm64.py', 'scripts/build_support/dependency_cache.py', 'scripts/build_support/dependency_env.py') }}
-          restore-keys: win-third-party-v1-${{ matrix.arch }}-
-
-      - name: Restore libraries cache.
-        id: cache-libraries
-        if: steps.cache-combined.outputs.cache-matched-key == ''
-        uses: actions/cache/restore@v6
-        with:
-          path: |
-            ${{ env.LIBRARIES_PATH }}\*
-            !${{ env.LIBRARIES_PATH }}\cache_keys
-            !${{ env.LIBRARIES_PATH }}\[qQ]t[_-]*
-            ${{ env.LIBRARIES_PATH }}\cache_keys\*
-            !${{ env.LIBRARIES_PATH }}\cache_keys\[qQ]t[_-]*
-          key: win-libraries-v1-${{ matrix.arch }}-${{ hashFiles('scripts/prebuild.py', 'scripts/trim_windows_cache.py', 'scripts/build_support/recipes.py', 'scripts/build_support/recipes_arm64.py', 'scripts/build_support/dependency_cache.py', 'scripts/build_support/dependency_env.py') }}
-          restore-keys: win-libraries-v1-${{ matrix.arch }}-
-
-      # Qt 同时包含 qt_* 源码目录、Qt-* 安装目录和对应的阶段完成标记。
-      - name: Restore Qt cache.
-        id: cache-qt
-        if: steps.cache-combined.outputs.cache-matched-key == ''
-        uses: actions/cache/restore@v6
-        with:
-          path: |
-            ${{ env.LIBRARIES_PATH }}\[qQ]t[_-]*
-            ${{ env.LIBRARIES_PATH }}\cache_keys\[qQ]t[_-]*
-          key: win-qt-v1-${{ matrix.arch }}-${{ hashFiles('scripts/prebuild.py', 'scripts/trim_windows_cache.py', 'scripts/build_support/recipes.py', 'scripts/build_support/recipes_arm64.py', 'scripts/build_support/dependency_cache.py', 'scripts/build_support/dependency_env.py') }}
-          restore-keys: win-qt-v1-${{ matrix.arch }}-
-
-      # 首次切换时复用旧的整包缓存；三个新分片都未命中时才恢复，避免相互覆盖。
-      - name: Restore legacy libraries cache.
-        id: cache-legacy
-        if: >-
-          steps.cache-combined.outputs.cache-matched-key == ''
-            && steps.cache-third-party.outputs.cache-matched-key == ''
-            && steps.cache-libraries.outputs.cache-matched-key == ''
-            && steps.cache-qt.outputs.cache-matched-key == ''
-        uses: actions/cache/restore@v6
-        with:
-          path: |
-            ${{ env.SHORT_WORKSPACE }}\build\tmp\Libraries
-            ${{ env.SHORT_WORKSPACE }}\build\tmp\ThirdParty
-          key: win-libs-${{ matrix.arch }}-${{ hashFiles('scripts/prebuild.py', 'scripts/trim_windows_cache.py', 'scripts/build_support/recipes.py', 'scripts/build_support/recipes_arm64.py', 'scripts/build_support/dependency_cache.py') }}
-          restore-keys: win-libs-${{ matrix.arch }}-
-
-      # 缓存归档保不住符号链接，msys2 的 mtab 与 dev 由运行时重建
-      - name: Clean broken msys2 links.
-        if: >-
-          steps.cache-combined.outputs.cache-matched-key != ''
-            || steps.cache-third-party.outputs.cache-matched-key != ''
-            || steps.cache-legacy.outputs.cache-matched-key != ''
-        shell: bash
-        working-directory: ${{ env.SHORT_WORKSPACE }}
-        run: |
-          set -euo pipefail
-          rm -f build/tmp/ThirdParty/msys64/etc/mtab
-          rm -rf build/tmp/ThirdParty/msys64/dev || true
-
       - name: Build dependencies.
         id: build-dependencies
         shell: cmd
@@ -273,18 +208,38 @@ jobs:
         working-directory: ${{ env.SHORT_WORKSPACE }}
         run: python scripts/trim_windows_cache.py build/tmp/Libraries build/tmp/ThirdParty
 
-      # 只有依赖编译和裁剪都成功才写入；应用编译失败不会污染这份依赖缓存。
-      - name: Save combined dependency cache.
+      # 只有 prebuild 和裁剪都成功才入库；后续应用编译失败不影响这份已验证缓存。
+      - name: Save libraries cache.
+        id: save-libs
         if: >-
           steps.build-dependencies.outcome == 'success'
             && steps.trim-dependencies.outcome == 'success'
-            && steps.cache-combined.outputs.cache-hit != 'true'
+            && steps.cache-libs.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: |
             ${{ env.SHORT_WORKSPACE }}\build\tmp\Libraries
             ${{ env.SHORT_WORKSPACE }}\build\tmp\ThirdParty
-          key: ${{ steps.cache-combined.outputs.cache-primary-key }}
+          key: ${{ steps.cache-libs.outputs.cache-primary-key }}
+
+      # 仅在当前世代已安全入库（或精确命中）后清理同前缀旧世代，防止两代叠加挤爆配额
+      - name: Prune old cache generations.
+        if: >-
+          steps.cache-libs.outputs.cache-hit == 'true'
+            || steps.save-libs.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_KEY: ${{ steps.cache-libs.outputs.cache-primary-key }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | select(.key | startswith(env.CACHE_KEY_PREFIX)) | select(.key != env.CURRENT_KEY) | .id' \
+            | while read -r id; do
+                test -z "$id" && continue
+                echo "deleting stale cache id $id"
+                gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" || true
+              done
 
       # Packer 是 Telegram 的构建依赖，私钥头文件必须在编译前就位
       - name: Write packer signing key.
@@ -307,7 +262,7 @@ jobs:
         working-directory: ${{ env.SHORT_WORKSPACE }}
         run: |
           set -euo pipefail
-          artifact=$(ls build/AyuGram-v*-win-${{ matrix.arch }}.zip | head -1)
+          artifact=$(ls build/AyuGram-v*-win-x64.zip | head -1)
           test -n "$artifact"
           size=$(stat -c %s "$artifact")
           echo "File size of ${artifact}: ${size} Bytes."
@@ -321,11 +276,11 @@ jobs:
           test -n "$version"
           packer=$(pwd)/build/tmp/out/Release/Packer.exe
           test -f "$packer"
-          cd build/AyuGram-v*-win-${{ matrix.arch }}-release
-          "$packer" -target ${{ matrix.special }} -version "$version" \
+          cd build/AyuGram-v*-win-x64-release
+          "$packer" -target win64 -version "$version" \
             -path AyuGram.exe -path Updater.exe
-          mv "${{ matrix.updater }}${version}" ../
-          ls -l "../${{ matrix.updater }}${version}"
+          mv "tx64upd${version}" ../
+          ls -l "../tx64upd${version}"
 
       - name: Write artifact provenance.
         shell: bash
@@ -339,11 +294,11 @@ jobs:
           APP_UPDATE_VERSION: ${{ inputs.appupdateversion }}
         run: |
           set -euo pipefail
-          archive=$(ls build/AyuGram-v*-win-${{ matrix.arch }}.zip)
-          update="build/${{ matrix.updater }}${APP_UPDATE_VERSION}"
+          archive=$(ls build/AyuGram-v*-win-x64.zip)
+          update="build/tx64upd${APP_UPDATE_VERSION}"
           python scripts/build_provenance.py write-artifact-manifest \
             --platform windows \
-            --arch "${{ matrix.arch }}" \
+            --arch x64 \
             --source-repository Kindness-Kismet/AyuGramDesktop-Plus \
             --source-ref "$SOURCE_REF" \
             --source-sha "$SOURCE_SHA" \
@@ -354,18 +309,18 @@ jobs:
             --builder-run-attempt "$GITHUB_RUN_ATTEMPT" \
             --version "$VERSION" \
             --appupdateversion "$APP_UPDATE_VERSION" \
-            --output "build/provenance-windows-${{ matrix.arch }}.json" \
+            --output "build/provenance-windows-x64.json" \
             --file "$archive" \
             --file "$update"
 
       - name: Upload artifact.
         uses: actions/upload-artifact@v7
         with:
-          name: AyuGram-Windows-${{ matrix.arch }}
+          name: AyuGram-Windows-x64
           path: |
-            ${{ env.SHORT_WORKSPACE }}\build\AyuGram-v*-win-${{ matrix.arch }}.zip
-            ${{ env.SHORT_WORKSPACE }}\build\${{ matrix.updater }}*
-            ${{ env.SHORT_WORKSPACE }}\build\provenance-windows-${{ matrix.arch }}.json
+            ${{ env.SHORT_WORKSPACE }}\build\AyuGram-v*-win-x64.zip
+            ${{ env.SHORT_WORKSPACE }}\build\tx64upd*
+            ${{ env.SHORT_WORKSPACE }}\build\provenance-windows-x64.json
           retention-days: 7
 
       - name: Remove packer signing key.
