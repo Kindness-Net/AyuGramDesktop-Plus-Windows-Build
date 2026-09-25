@@ -45,10 +45,8 @@ jobs:
     timeout-minutes: 359
 
     env:
-      # /m 与 /MP 相乘耗尽内存会僵死 runner，锁定单项目串行
-      AYUGRAM_SINGLE_PROJECT_BUILD: '1'
-      # tg_owt 模板单元单个 2 GB 以上，并发顶格 2
-      BUILD_JOBS: '2'
+      # 4 核 16 GB 的 runner，Release 不带调试信息后内存足够 3 路并发
+      BUILD_JOBS: '3'
       # 传给 scripts/build_support，按行指定目标平台与工具链
       AYUGRAM_TARGET: win64
       AYUGRAM_TOOLSET_VERSION: '14.51'
