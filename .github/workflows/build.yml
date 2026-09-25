@@ -55,6 +55,13 @@ jobs:
       AYUGRAM_VCVARS_ARCH: x64
       SHORT_WORKSPACE: 'D:\w'
       CACHE_KEY_PREFIX: win-libs-x64-
+      # 发布包哈希与 GitHub 发布页的 digest 一致，升级版本时两项一起改
+      CCACHE_PACKAGE: ccache-4.14-windows-x86_64
+      CCACHE_SHA256: 2568347a697e103ca1b073981c704ad76fb2507d066c38dba038dd73399d968f
+      CCACHE_URL: https://github.com/ccache/ccache/releases/download/v4.14
+      # 与依赖缓存共用仓库 10 GB 配额，两者合计须留有余量
+      CCACHE_MAXSIZE: 4G
+      CCACHE_KEY_PREFIX: win-ccache-x64-
 
     steps:
       - name: Validate dispatcher.
@@ -239,6 +246,27 @@ jobs:
                 gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" || true
               done
 
+      # build.py 读取 AYUGRAM_CCACHE 接入编译器；packer.cpp 自带 ccache:disable，私钥不进缓存
+      - name: Install ccache.
+        shell: bash
+        run: |
+          set -euo pipefail
+          temp=$(cygpath -u "$RUNNER_TEMP")
+          curl -fsSLo "$temp/ccache.zip" "$CCACHE_URL/$CCACHE_PACKAGE.zip"
+          echo "$CCACHE_SHA256  $temp/ccache.zip" | sha256sum -c -
+          python -m zipfile -e "$temp/ccache.zip" "$temp"
+          echo "AYUGRAM_CCACHE=$(cygpath -w "$temp/$CCACHE_PACKAGE/ccache.exe")" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$(cygpath -w "$temp/ccache-data")" >> "$GITHUB_ENV"
+
+      # 放在依赖缓存之后恢复：依赖缓存换代时配额超限，先被淘汰的是编译缓存
+      - name: Restore compiler cache.
+        id: cache-ccache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ env.CCACHE_KEY_PREFIX }}${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ${{ env.CCACHE_KEY_PREFIX }}
+
       # Packer 是 Telegram 的构建依赖，私钥头文件必须在编译前就位
       - name: Write packer signing key.
         shell: bash
@@ -253,7 +281,43 @@ jobs:
       - name: Build AyuGram Desktop.
         shell: cmd
         working-directory: ${{ env.SHORT_WORKSPACE }}
-        run: python scripts/build.py --jobs %BUILD_JOBS% --pack --clean-pack
+        run: |
+          "%AYUGRAM_CCACHE%" -z || exit /b 1
+          python scripts/build.py --jobs %BUILD_JOBS% --pack --clean-pack
+
+      - name: Count ccache misses.
+        id: ccache-stats
+        shell: bash
+        run: |
+          set -euo pipefail
+          ccache=$(cygpath -u "$AYUGRAM_CCACHE")
+          "$ccache" --show-stats
+          misses=$("$ccache" --print-stats | tr -d '\r' | sed -n 's/^cache_miss\t//p' | head -1)
+          case "$misses" in (*[!0-9]*|'') misses=0;; esac
+          echo "misses=$misses" >> "$GITHUB_OUTPUT"
+
+      # 先删旧世代再入库，两代编译缓存叠加会把依赖缓存挤出配额
+      - name: Prune old compiler caches.
+        if: fromJSON(steps.ccache-stats.outputs.misses) > 300
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | select(.key | startswith(env.CCACHE_KEY_PREFIX)) | .id' \
+            | while read -r id; do
+                test -z "$id" && continue
+                echo "deleting stale compiler cache id $id"
+                gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" || true
+              done
+
+      - name: Save compiler cache.
+        if: fromJSON(steps.ccache-stats.outputs.misses) > 300
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.cache-ccache.outputs.cache-primary-key }}
 
       - name: Check release output.
         shell: bash
