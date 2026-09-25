@@ -106,7 +106,7 @@ jobs:
             --run-attempt "$SOURCE_RUN_ATTEMPT" \
             --version "$VERSION" \
             --appupdateversion "$APP_UPDATE_VERSION" \
-            --workflow-path .github/workflows/release.yml
+            --workflow-path .github/workflows/build-release.yml
 
       - name: Check packer cache guard.
         shell: bash
